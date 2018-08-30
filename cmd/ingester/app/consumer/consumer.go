@@ -15,7 +15,10 @@
 package consumer
 
 import (
+	"os"
+	"runtime"
 	"sync"
+	"time"
 
 	"github.com/Shopify/sarama"
 	sc "github.com/bsm/sarama-cluster"
@@ -99,11 +102,28 @@ func (c *Consumer) handleMessages(pc sc.PartitionConsumer) {
 	msgMetrics := c.newMsgMetrics(pc.Partition())
 	var msgProcessor processor.SpanProcessor
 
+	// Commit seppuku if no messages have been consumed in a minute
+	msgConsumed := 0
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	go func() {
+		time.Sleep(time.Minute)
+		for range ticker.C {
+			if msgConsumed == 0 {
+				buf := make([]byte, 1<<20)
+				stacklen := runtime.Stack(buf, true)
+				c.logger.Panic("No messages processed in the last minute", zap.Any("stack", buf[:stacklen]))
+				os.Exit(1)
+			}
+		}
+	}()
+
 	for msg := range pc.Messages() {
 		c.logger.Debug("Got msg", zap.Any("msg", msg))
 		msgMetrics.counter.Inc(1)
 		msgMetrics.offsetGauge.Update(msg.Offset)
 		msgMetrics.lagGauge.Update(pc.HighWaterMarkOffset() - msg.Offset - 1)
+		msgConsumed++
 
 		if msgProcessor == nil {
 			msgProcessor = c.processorFactory.new(pc.Partition(), msg.Offset-1)
