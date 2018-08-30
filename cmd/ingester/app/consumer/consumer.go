@@ -18,6 +18,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Shopify/sarama"
@@ -103,17 +104,19 @@ func (c *Consumer) handleMessages(pc sc.PartitionConsumer) {
 	var msgProcessor processor.SpanProcessor
 
 	// Commit seppuku if no messages have been consumed in a minute
-	msgConsumed := 0
+	var msgConsumed uint64
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	go func() {
 		time.Sleep(time.Minute)
 		for range ticker.C {
-			if msgConsumed == 0 {
+			if atomic.LoadUint64(&msgConsumed) == 0 {
 				buf := make([]byte, 1<<20)
 				stacklen := runtime.Stack(buf, true)
 				c.logger.Panic("No messages processed in the last minute", zap.Any("stack", buf[:stacklen]))
 				os.Exit(1)
+			} else {
+				atomic.StoreUint64(&msgConsumed, 0)
 			}
 		}
 	}()
@@ -123,7 +126,7 @@ func (c *Consumer) handleMessages(pc sc.PartitionConsumer) {
 		msgMetrics.counter.Inc(1)
 		msgMetrics.offsetGauge.Update(msg.Offset)
 		msgMetrics.lagGauge.Update(pc.HighWaterMarkOffset() - msg.Offset - 1)
-		msgConsumed++
+		atomic.AddUint64(&msgConsumed, 1)
 
 		if msgProcessor == nil {
 			msgProcessor = c.processorFactory.new(pc.Partition(), msg.Offset-1)
